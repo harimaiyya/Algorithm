@@ -1,0 +1,167 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import time
+from datetime import datetime
+
+# ── Configuration ────────────────────────────────────────────────────────────
+FOLDER_PATH          = r"C:\Users\ravin\OneDrive\Desktop\images\Hexcel-180-150-5C_B"
+BRIGHTNESS_THRESHOLD = 8    # lower = more sensitive
+AREA_THRESHOLD       = 20   # minimum contour area (px) to count as an event
+BLUR                 = (5, 5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_pipeline(folder_path):
+    image_files = sorted([
+        f for f in os.listdir(folder_path)
+        if f.lower().endswith(('.tiff', '.tif', '.png', '.jpg', '.jpeg'))
+    ])
+
+    if not image_files:
+        print("No images found in folder. Check the path and try again.")
+        return
+
+    print(f"\n{'='*55}")
+    print(f"  Crystal Nucleation Detection Pipeline")
+    print(f"  University of North Florida")
+    print(f"{'='*55}")
+    print(f"  Folder   : {folder_path}")
+    print(f"  Images   : {len(image_files)}")
+    print(f"  Threshold: {BRIGHTNESS_THRESHOLD}  |  Min area: {AREA_THRESHOLD} px  |  Blur: {BLUR}")
+    print(f"{'='*55}\n")
+
+    prev_img    = None
+    results     = []
+    start_time  = time.time()
+
+    for i, file in enumerate(image_files):
+        img = cv2.imread(os.path.join(folder_path, file), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            results.append({
+                "frame_index"       : i,
+                "filename"          : file,
+                "nucleation_events" : 0,
+                "note"              : "failed to load"
+            })
+            continue
+
+        img_blur = cv2.GaussianBlur(img, BLUR, 0)
+
+        if prev_img is None:
+            prev_img = img_blur
+            results.append({
+                "frame_index"       : i,
+                "filename"          : file,
+                "nucleation_events" : 0,
+                "note"              : "first frame"
+            })
+            continue
+
+        diff = img_blur.astype(np.int16) - prev_img.astype(np.int16)
+        mask = (diff > BRIGHTNESS_THRESHOLD).astype(np.uint8)
+
+        kernel = np.ones((3, 3), np.uint8)
+        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+        mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        count = sum(1 for c in contours if cv2.contourArea(c) >= AREA_THRESHOLD)
+
+        results.append({
+            "frame_index"       : i,
+            "filename"          : file,
+            "nucleation_events" : count,
+            "note"              : ""
+        })
+
+        prev_img = img_blur
+
+        if i % 50 == 0:
+            elapsed   = time.time() - start_time
+            rate      = (i + 1) / elapsed if elapsed > 0 else 0
+            remaining = (len(image_files) - i - 1) / rate if rate > 0 else 0
+            print(f"  Processing frame {i+1}/{len(image_files)}  —  ETA: {remaining:.0f}s")
+
+    # ── Build DataFrame ───────────────────────────────────────────────────────
+    df = pd.DataFrame(results)
+
+    # Summary stats columns
+    counts                  = df["nucleation_events"]
+    df["cumulative_total"]  = counts.cumsum()
+    df["rolling_avg_5"]     = counts.rolling(window=5, min_periods=1).mean().round(2)
+    df["rolling_avg_10"]    = counts.rolling(window=10, min_periods=1).mean().round(2)
+
+    # ── Summary sheet data ────────────────────────────────────────────────────
+    total_elapsed = time.time() - start_time
+    summary = {
+        "Metric"  : [
+            "Run timestamp",
+            "Folder",
+            "Total frames",
+            "Processing time (s)",
+            "Brightness threshold",
+            "Area threshold (px)",
+            "Blur kernel",
+            "Total nucleation events",
+            "Mean events / frame",
+            "Max events / frame",
+            "Max events frame index",
+            "Min events / frame (excl. first)",
+        ],
+        "Value" : [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            folder_path,
+            len(image_files),
+            round(total_elapsed, 2),
+            BRIGHTNESS_THRESHOLD,
+            AREA_THRESHOLD,
+            str(BLUR),
+            int(counts.sum()),
+            round(counts.mean(), 2),
+            int(counts.max()),
+            int(counts.idxmax()),
+            int(counts[1:].min()),
+        ]
+    }
+    df_summary = pd.DataFrame(summary)
+
+    # ── Save to Excel ─────────────────────────────────────────────────────────
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_name = f"nucleation_results_{timestamp}.xlsx"
+    output_path = os.path.join(folder_path, output_name)
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df_summary.to_excel(writer, sheet_name="Summary",     index=False)
+        df.to_excel(        writer, sheet_name="Frame Data",  index=False)
+
+    print(f"\n{'='*55}")
+    print(f"  Done! Results saved to:")
+    print(f"  {output_path}")
+    print(f"  Total nucleation events : {int(counts.sum())}")
+    print(f"  Peak frame              : {int(counts.idxmax())} ({int(counts.max())} events)")
+    print(f"  Total time              : {total_elapsed:.1f}s")
+    print(f"{'='*55}\n")
+
+    # ── Plot ──────────────────────────────────────────────────────────────────
+    smoothed = np.convolve(counts, np.ones(5) / 5, mode='same')
+    plt.figure(figsize=(10, 6))
+    plt.plot(counts,   color="lightsteelblue", linewidth=1,   alpha=0.5, label="Raw")
+    plt.plot(smoothed, color="steelblue",      linewidth=2,   label="5-frame avg")
+    plt.xlabel("Frame")
+    plt.ylabel("New Nucleation Events")
+    plt.title("Crystal Nucleation Over Time")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    plot_path = os.path.join(folder_path, f"nucleation_plot_{timestamp}.png")
+    plt.savefig(plot_path, dpi=150)
+    plt.show()
+    print(f"  Plot saved to: {plot_path}\n")
+
+
+if __name__ == "__main__":
+    run_pipeline(FOLDER_PATH)
