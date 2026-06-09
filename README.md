@@ -1,4 +1,4 @@
-# Crystal Nucleation Detection Algorithm
+# Crystal Nucleation Detection Algorithms
 
 A computer vision algorithm using Python and OpenCV to autonomously detect and quantify crystal nucleation events from microscopy image sequences.
 
